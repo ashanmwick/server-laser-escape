@@ -1,6 +1,6 @@
 import { Room, Client } from "colyseus";
 import { ArenaState, PlayerState, WallState } from "./schema/ArenaState.js";
-import { WALL_TYPES, WALL_MAX_HEALTH, TARGET_IDS } from "../constants.js";
+import { WALL_IDS, WALL_STRENGTH, TARGET_IDS } from "../constants.js";
 
 // Cap on the JSON avatar blob (see ArenaState.ts PlayerState.avatar). A full
 // equipped set + 7 proportions serialises to a few hundred bytes; 4 KB is
@@ -44,15 +44,20 @@ export class ArenaRoom extends Room<{ state: ArenaState }> {
       const avatar = sanitizeAvatar(msg?.avatar);
       if (avatar) p.avatar = avatar;
     },
-    // Throttled client-side. No validation -- client-trusted design, matches
-    // the existing local-only damage model.
-    wallDamage: (client: Client, msg: { wallType: string; hp: number }) => {
-      const w = this.state.walls.get(msg.wallType);
+    // A client reporting a wall's health pool after one of its own strikes
+    // (client src/systems/wallHealth.js). Sent per discrete strike -- a click,
+    // then one per hold interval -- not per frame. No validation: the value is
+    // clamped to the wall's pool and stored, every other client adopts it.
+    // Walls only ever lose health here; a full restore is `winPanelHit`.
+    wallDamage: (client: Client, msg: { wallId: string; hp: number }) => {
+      const w = this.state.walls.get(msg.wallId);
       if (!w || w.destroyed) return;
+      if (typeof msg.hp !== "number" || !Number.isFinite(msg.hp)) return;
       w.hp = Math.max(0, Math.min(msg.hp, w.maxHp));
+      if (w.hp === 0) w.destroyed = true;
     },
-    wallDestroyed: (client: Client, msg: { wallType: string }) => {
-      const w = this.state.walls.get(msg.wallType);
+    wallDestroyed: (client: Client, msg: { wallId: string }) => {
+      const w = this.state.walls.get(msg.wallId);
       if (!w) return;
       w.hp = 0;
       w.destroyed = true;
@@ -61,8 +66,10 @@ export class ArenaRoom extends Room<{ state: ArenaState }> {
       if (!TARGET_IDS.includes(msg.targetId)) return;
       this.state.targetsHit.set(msg.targetId, true);
     },
-    // Mirrors App.jsx's handleWinPanelHit exactly: resets every wall's
-    // hp/destroyed, does NOT touch targetsHit.
+    // A client reached a win panel (client src/systems/glowFloorPanel.js ->
+    // wallHealth.js resetWalls). Restore every wall to full for the whole room
+    // and bump resetNonce -- the unambiguous "a reset happened" signal every
+    // other client watches to run its own local wall reset.
     winPanelHit: (client: Client) => {
       for (const w of this.state.walls.values()) {
         w.hp = w.maxHp;
@@ -73,11 +80,11 @@ export class ArenaRoom extends Room<{ state: ArenaState }> {
   };
 
   onCreate() {
-    for (const wallType of WALL_TYPES) {
+    for (const id of WALL_IDS) {
       const w = new WallState();
-      w.hp = WALL_MAX_HEALTH;
-      w.maxHp = WALL_MAX_HEALTH;
-      this.state.walls.set(wallType, w);
+      w.hp = WALL_STRENGTH[id];
+      w.maxHp = WALL_STRENGTH[id];
+      this.state.walls.set(id, w);
     }
   }
 

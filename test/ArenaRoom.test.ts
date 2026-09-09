@@ -3,7 +3,7 @@ import { ColyseusTestServer, boot } from "@colyseus/testing";
 
 import appConfig from "../src/app.config.js";
 import { ArenaState } from "../src/rooms/schema/ArenaState.js";
-import { WALL_TYPES } from "../src/constants.js";
+import { WALL_IDS, WALL_STRENGTH } from "../src/constants.js";
 
 describe("testing your Colyseus app", () => {
   let colyseus: ColyseusTestServer<typeof appConfig>;
@@ -24,7 +24,8 @@ describe("testing your Colyseus app", () => {
 
     // make your assertions
     assert.strictEqual(client1.sessionId, room.clients[0].sessionId);
-    assert.strictEqual(Object.keys(client1.state.toJSON().walls ?? {}).length, WALL_TYPES.length);
+    assert.strictEqual(Object.keys(client1.state.toJSON().walls ?? {}).length, WALL_IDS.length);
+    assert.strictEqual(client1.state.walls.get("brick_wall").hp, WALL_STRENGTH["brick_wall"]);
   });
 
   // Exercises the exact message shapes src/network/NetworkContext.jsx and
@@ -48,11 +49,11 @@ describe("testing your Colyseus app", () => {
     assert.strictEqual(p1FromClient2.firing, true);
     assert.strictEqual(p1FromClient2.beamToZ, 6);
 
-    client1.send("wallDamage", { wallType: "brick_wall", hp: 42 });
+    client1.send("wallDamage", { wallId: "brick_wall", hp: 42 });
     await room.waitForNextPatch();
     assert.strictEqual(client2.state.walls.get("brick_wall").hp, 42);
 
-    client1.send("wallDestroyed", { wallType: "brick_wall" });
+    client1.send("wallDestroyed", { wallId: "brick_wall" });
     await room.waitForNextPatch();
     assert.strictEqual(client2.state.walls.get("brick_wall").destroyed, true);
 
@@ -70,7 +71,10 @@ describe("testing your Colyseus app", () => {
     const nonceBefore = client2.state.resetNonce;
     client1.send("winPanelHit", {});
     await room.waitForNextPatch();
-    assert.strictEqual(client2.state.walls.get("brick_wall").hp, 100);
+    assert.strictEqual(
+      client2.state.walls.get("brick_wall").hp,
+      WALL_STRENGTH["brick_wall"],
+    );
     assert.strictEqual(client2.state.walls.get("brick_wall").destroyed, false);
     assert.strictEqual(client2.state.resetNonce, nonceBefore + 1);
   });
