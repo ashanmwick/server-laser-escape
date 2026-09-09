@@ -2,6 +2,15 @@ import { Room, Client } from "colyseus";
 import { ArenaState, PlayerState, WallState } from "./schema/ArenaState.js";
 import { WALL_TYPES, WALL_MAX_HEALTH, TARGET_IDS } from "../constants.js";
 
+// Cap on the JSON avatar blob (see ArenaState.ts PlayerState.avatar). A full
+// equipped set + 7 proportions serialises to a few hundred bytes; 4 KB is
+// generous headroom and still bounds a misbehaving client.
+const AVATAR_MAX_LEN = 4096;
+
+function sanitizeAvatar(raw: unknown): string {
+  return typeof raw === "string" && raw.length <= AVATAR_MAX_LEN ? raw : "";
+}
+
 /**
  * Single global room every client joins via `client.joinOrCreate("arena")`.
  * No server-side hit validation -- clients report events (as they already do
@@ -24,6 +33,16 @@ export class ArenaRoom extends Room<{ state: ArenaState }> {
       p.beamToX = msg.beamToX;
       p.beamToY = msg.beamToY;
       p.beamToZ = msg.beamToZ;
+    },
+    // The player's Bloxity avatar (equipped cosmetics + proportions) as a JSON
+    // string. Sent once on connect and again whenever the portal reports the
+    // avatar changed -- a human-speed event, not a per-frame one. Stored as-is
+    // so every other client can build the real character; never parsed here.
+    setAvatar: (client: Client, msg: { avatar?: string }) => {
+      const p = this.state.players.get(client.sessionId);
+      if (!p) return;
+      const avatar = sanitizeAvatar(msg?.avatar);
+      if (avatar) p.avatar = avatar;
     },
     // Throttled client-side. No validation -- client-trusted design, matches
     // the existing local-only damage model.
@@ -62,10 +81,15 @@ export class ArenaRoom extends Room<{ state: ArenaState }> {
     }
   }
 
-  onJoin(client: Client) {
+  onJoin(client: Client, options?: { username?: string; avatar?: string }) {
     // No spawn assignment -- the client already hardcodes spawnPosition
     // and reports its real position in its first "move" message.
-    this.state.players.set(client.sessionId, new PlayerState());
+    const p = new PlayerState();
+    p.username = typeof options?.username === "string" ? options.username.slice(0, 64) : "";
+    // Seed the avatar from the join options too, so a client that joins is
+    // rendered as the right character even before its first `setAvatar`.
+    p.avatar = sanitizeAvatar(options?.avatar);
+    this.state.players.set(client.sessionId, p);
   }
 
   onLeave(client: Client) {

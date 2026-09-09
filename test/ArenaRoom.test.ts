@@ -60,6 +60,13 @@ describe("testing your Colyseus app", () => {
     await room.waitForNextPatch();
     assert.strictEqual(client2.state.targetsHit.get("target-a"), true);
 
+    // Avatar blob relays verbatim, so client2 can rebuild client1's real
+    // Bloxity character (equipped cosmetics + proportions).
+    const avatar = JSON.stringify({ e: { headId: "42" }, p: { height: 1.2 } });
+    client1.send("setAvatar", { avatar });
+    await room.waitForNextPatch();
+    assert.strictEqual(client2.state.players.get(client1.sessionId).avatar, avatar);
+
     const nonceBefore = client2.state.resetNonce;
     client1.send("winPanelHit", {});
     await room.waitForNextPatch();

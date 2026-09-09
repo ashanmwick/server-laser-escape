@@ -2,6 +2,7 @@ import { schema, t, type SchemaType } from "@colyseus/schema";
 
 export const PlayerState = schema(
   {
+    username: t.string().default(""), // client-reported Bloxity displayName/username, not validated
     x: t.number().default(0),
     y: t.number().default(0),
     z: t.number().default(0),
@@ -11,6 +12,12 @@ export const PlayerState = schema(
     beamToX: t.number().default(0), // world-space beam endpoint, so remote clients don't re-raycast
     beamToY: t.number().default(0),
     beamToZ: t.number().default(0),
+    // The player's Bloxity avatar, so remote clients render the real character
+    // (equipped cosmetics + proportions) instead of a capsule. A JSON string:
+    // {"e": <equipped ids object>, "p": <proportions object>}. Client-reported,
+    // never validated -- same trust model as `username`; only length-capped
+    // (see ArenaRoom.ts AVATAR_MAX_LEN).
+    avatar: t.string().default(""),
   },
   "PlayerState",
 );
