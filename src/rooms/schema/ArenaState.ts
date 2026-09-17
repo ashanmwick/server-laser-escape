@@ -18,27 +18,34 @@ export const PlayerState = schema(
     // never validated -- same trust model as `username`; only length-capped
     // (see ArenaRoom.ts AVATAR_MAX_LEN).
     avatar: t.string().default(""),
+    // Live client-reported gameplay stats (client store/useGameStore.js
+    // power/rebirth/wins), so an in-world leaderboard (client components/
+    // LeaderboardBoard.jsx) can rank currently-connected players. Client-
+    // reported, never validated beyond a finite/non-negative check
+    // (ArenaRoom.ts's `stats` handler) -- same trust model as `username`/
+    // `avatar`. No persistence: like every other field here, these reset to
+    // 0 for a player on rejoin and the whole room resets on server restart.
+    power: t.number().default(0),
+    rebirth: t.number().default(0),
+    wins: t.number().default(0),
+    // PVP health (client src/systems/playerCombat.js / playerHealth.js). The
+    // attacker's client computes and reports the target's next hp (client-
+    // trusted, same as `move`/`username`); `dead` flips true the instant hp
+    // hits 0 and stays true until the dead player's own client sends
+    // `playerRespawn`. Default matches client src/data/playerHealth.js's
+    // PLAYER_MAX_HP.
+    hp: t.number().default(100),
+    maxHp: t.number().default(100),
+    dead: t.boolean().default(false),
   },
   "PlayerState",
 );
 export type PlayerState = SchemaType<typeof PlayerState>;
 
-export const WallState = schema(
-  {
-    hp: t.number().default(100),
-    maxHp: t.number().default(100),
-    destroyed: t.boolean().default(false),
-  },
-  "WallState",
-);
-export type WallState = SchemaType<typeof WallState>;
-
 export const ArenaState = schema(
   {
     players: t.map(PlayerState), // keyed by sessionId
-    walls: t.map(WallState), // keyed by wallType string (matches wallHealth Map keys, e.g. "brick_wall")
     targetsHit: t.map("boolean"), // keyed by target id ("target-a" | "target-b" | "target-c")
-    resetNonce: t.number().default(0), // incremented on every winPanelHit -- unambiguous room-wide "reset happened" signal
   },
   "ArenaState",
 );

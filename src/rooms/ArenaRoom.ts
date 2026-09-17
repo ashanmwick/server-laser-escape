@@ -1,6 +1,6 @@
-import { Room, Client } from "colyseus";
-import { ArenaState, PlayerState, WallState } from "./schema/ArenaState.js";
-import { WALL_IDS, WALL_STRENGTH, TARGET_IDS } from "../constants.js";
+import { Room, Client, CloseCode } from "colyseus";
+import { ArenaState, PlayerState } from "./schema/ArenaState.js";
+import { TARGET_IDS } from "../constants.js";
 
 // Cap on the JSON avatar blob (see ArenaState.ts PlayerState.avatar). A full
 // equipped set + 7 proportions serialises to a few hundred bytes; 4 KB is
@@ -44,49 +44,52 @@ export class ArenaRoom extends Room<{ state: ArenaState }> {
       const avatar = sanitizeAvatar(msg?.avatar);
       if (avatar) p.avatar = avatar;
     },
-    // A client reporting a wall's health pool after one of its own strikes
-    // (client src/systems/wallHealth.js). Sent per discrete strike -- a click,
-    // then one per hold interval -- not per frame. No validation: the value is
-    // clamped to the wall's pool and stored, every other client adopts it.
-    // Walls only ever lose health here; a full restore is `winPanelHit`.
-    wallDamage: (client: Client, msg: { wallId: string; hp: number }) => {
-      const w = this.state.walls.get(msg.wallId);
-      if (!w || w.destroyed) return;
-      if (typeof msg.hp !== "number" || !Number.isFinite(msg.hp)) return;
-      w.hp = Math.max(0, Math.min(msg.hp, w.maxHp));
-      if (w.hp === 0) w.destroyed = true;
-    },
-    wallDestroyed: (client: Client, msg: { wallId: string }) => {
-      const w = this.state.walls.get(msg.wallId);
-      if (!w) return;
-      w.hp = 0;
-      w.destroyed = true;
+    // The player's own live stats (client store/useGameStore.js power/
+    // rebirth/wins), so an in-world leaderboard (client components/
+    // LeaderboardBoard.jsx) can rank currently-connected players. Sent
+    // debounced on change (client systems/net.js scheduleStatsResend), not
+    // per frame -- same "human-speed event" cadence as setAvatar above. No
+    // validation beyond finite/non-negative, same trust model as every other
+    // message here.
+    stats: (client: Client, msg: { power?: number; rebirth?: number; wins?: number }) => {
+      const p = this.state.players.get(client.sessionId);
+      if (!p) return;
+      if (typeof msg?.power === "number" && Number.isFinite(msg.power)) {
+        p.power = Math.max(0, msg.power);
+      }
+      if (typeof msg?.rebirth === "number" && Number.isFinite(msg.rebirth)) {
+        p.rebirth = Math.max(0, msg.rebirth);
+      }
+      if (typeof msg?.wins === "number" && Number.isFinite(msg.wins)) {
+        p.wins = Math.max(0, msg.wins);
+      }
     },
     targetHit: (client: Client, msg: { targetId: string }) => {
       if (!TARGET_IDS.includes(msg.targetId)) return;
       this.state.targetsHit.set(msg.targetId, true);
     },
-    // A client reached a win panel (client src/systems/glowFloorPanel.js ->
-    // wallHealth.js resetWalls). Restore every wall to full for the whole room
-    // and bump resetNonce -- the unambiguous "a reset happened" signal every
-    // other client watches to run its own local wall reset.
-    winPanelHit: (client: Client) => {
-      for (const w of this.state.walls.values()) {
-        w.hp = w.maxHp;
-        w.destroyed = false;
-      }
-      this.state.resetNonce++;
+    // A client reporting a PVP hit it landed on another player (client
+    // src/systems/playerCombat.js strikeTarget()) -- client-trusted, same as
+    // `move`/`username`. No self-damage, and a dead target stays dead until
+    // its own client sends playerRespawn.
+    playerDamage: (client: Client, msg: { targetId: string; hp: number }) => {
+      if (!msg || msg.targetId === client.sessionId) return;
+      const target = this.state.players.get(msg.targetId);
+      if (!target || target.dead) return;
+      if (typeof msg.hp !== "number" || !Number.isFinite(msg.hp)) return;
+      target.hp = Math.max(0, Math.min(msg.hp, target.maxHp));
+      if (target.hp === 0) target.dead = true;
+    },
+    // The dead player's own client, once its local respawn timer elapses
+    // (client src/systems/playerHealth.js). Restores this one player to full
+    // hp and clears `dead`.
+    playerRespawn: (client: Client) => {
+      const p = this.state.players.get(client.sessionId);
+      if (!p) return;
+      p.hp = p.maxHp;
+      p.dead = false;
     },
   };
-
-  onCreate() {
-    for (const id of WALL_IDS) {
-      const w = new WallState();
-      w.hp = WALL_STRENGTH[id];
-      w.maxHp = WALL_STRENGTH[id];
-      this.state.walls.set(id, w);
-    }
-  }
 
   onJoin(client: Client, options?: { username?: string; avatar?: string }) {
     // No spawn assignment -- the client already hardcodes spawnPosition
@@ -99,7 +102,30 @@ export class ArenaRoom extends Room<{ state: ArenaState }> {
     this.state.players.set(client.sessionId, p);
   }
 
-  onLeave(client: Client) {
-    this.state.players.delete(client.sessionId);
+  // A deliberate `room.leave()` (client teardown()) closes with CONSENTED --
+  // drop that player immediately, same as before. Anything else (WiFi blip,
+  // backgrounded tab, mobile network switch) is exactly what the CLIENT's own
+  // net.js already assumes rides out via "@colyseus/sdk's built-in Room
+  // reconnection" (its own header comment) -- but that reconnection can only
+  // succeed if THIS room still recognises the old session when the client
+  // comes back. Without allowReconnection, every abnormal drop looked
+  // consented to the room: the PlayerState was deleted on the spot, so a
+  // client reconnecting moments later re-joined as a brand new player while
+  // its OWN local remotePlayers bookkeeping (and everyone else's) still held
+  // stale references to the old sessionId for a few seconds -- exactly the
+  // kind of "some clients show a player, some don't" asymmetry that timing-
+  // dependent double-bookkeeping produces. 20s matches the client's own
+  // RETRY_BACKOFF_MS ceiling (data/net.js).
+  async onLeave(client: Client, code?: number) {
+    if (code === CloseCode.CONSENTED) {
+      this.state.players.delete(client.sessionId);
+      return;
+    }
+    try {
+      await this.allowReconnection(client, 20);
+      // Reconnected within the window -- same sessionId, PlayerState untouched.
+    } catch {
+      this.state.players.delete(client.sessionId);
+    }
   }
 }

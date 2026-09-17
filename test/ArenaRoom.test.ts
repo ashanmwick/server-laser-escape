@@ -3,7 +3,6 @@ import { ColyseusTestServer, boot } from "@colyseus/testing";
 
 import appConfig from "../src/app.config.js";
 import { ArenaState } from "../src/rooms/schema/ArenaState.js";
-import { WALL_IDS, WALL_STRENGTH } from "../src/constants.js";
 
 describe("testing your Colyseus app", () => {
   let colyseus: ColyseusTestServer<typeof appConfig>;
@@ -24,15 +23,13 @@ describe("testing your Colyseus app", () => {
 
     // make your assertions
     assert.strictEqual(client1.sessionId, room.clients[0].sessionId);
-    assert.strictEqual(Object.keys(client1.state.toJSON().walls ?? {}).length, WALL_IDS.length);
-    assert.strictEqual(client1.state.walls.get("brick_wall").hp, WALL_STRENGTH["brick_wall"]);
   });
 
   // Exercises the exact message shapes src/network/NetworkContext.jsx and
   // Player.jsx send from the client, end-to-end against the real room --
   // catches a field-name mismatch between client and server that a
   // TypeScript-only check on the server side can't.
-  it("relays move/wallDamage/targetHit/winPanelHit between two clients", async () => {
+  it("relays move/targetHit between two clients", async () => {
     const room = await colyseus.createRoom<ArenaState>("arena", {});
     const client1 = await colyseus.connectTo(room);
     const client2 = await colyseus.connectTo(room);
@@ -49,14 +46,6 @@ describe("testing your Colyseus app", () => {
     assert.strictEqual(p1FromClient2.firing, true);
     assert.strictEqual(p1FromClient2.beamToZ, 6);
 
-    client1.send("wallDamage", { wallId: "brick_wall", hp: 42 });
-    await room.waitForNextPatch();
-    assert.strictEqual(client2.state.walls.get("brick_wall").hp, 42);
-
-    client1.send("wallDestroyed", { wallId: "brick_wall" });
-    await room.waitForNextPatch();
-    assert.strictEqual(client2.state.walls.get("brick_wall").destroyed, true);
-
     client1.send("targetHit", { targetId: "target-a" });
     await room.waitForNextPatch();
     assert.strictEqual(client2.state.targetsHit.get("target-a"), true);
@@ -68,14 +57,58 @@ describe("testing your Colyseus app", () => {
     await room.waitForNextPatch();
     assert.strictEqual(client2.state.players.get(client1.sessionId).avatar, avatar);
 
-    const nonceBefore = client2.state.resetNonce;
-    client1.send("winPanelHit", {});
+    // Stats relay verbatim (clamped to >= 0), so client2 can rank client1 on
+    // an in-world leaderboard.
+    client1.send("stats", { power: 2480, rebirth: 3, wins: 17 });
     await room.waitForNextPatch();
-    assert.strictEqual(
-      client2.state.walls.get("brick_wall").hp,
-      WALL_STRENGTH["brick_wall"],
-    );
-    assert.strictEqual(client2.state.walls.get("brick_wall").destroyed, false);
-    assert.strictEqual(client2.state.resetNonce, nonceBefore + 1);
+    const p1StatsFromClient2 = client2.state.players.get(client1.sessionId);
+    assert.strictEqual(p1StatsFromClient2.power, 2480);
+    assert.strictEqual(p1StatsFromClient2.rebirth, 3);
+    assert.strictEqual(p1StatsFromClient2.wins, 17);
+
+    // A negative value (never legitimately sent by the client, but the room
+    // trusts the wire otherwise) is clamped rather than relayed as-is.
+    client1.send("stats", { power: -5 });
+    await room.waitForNextPatch();
+    assert.strictEqual(client2.state.players.get(client1.sessionId).power, 0);
+  });
+
+  // PVP: client1 reports the hit it landed on client2 (exact shape src/
+  // systems/playerCombat.js strikeTarget() sends), client2 sees its own hp
+  // drop and, once it hits 0, itself flip dead -- then reports its own
+  // respawn (src/systems/playerHealth.js) and comes back to full health.
+  it("relays playerDamage/playerRespawn between two clients", async () => {
+    const room = await colyseus.createRoom<ArenaState>("arena", {});
+    const client1 = await colyseus.connectTo(room);
+    const client2 = await colyseus.connectTo(room);
+    await room.waitForNextPatch();
+
+    assert.strictEqual(client1.state.players.get(client2.sessionId).hp, 100);
+
+    client1.send("playerDamage", { targetId: client2.sessionId, hp: 63 });
+    await room.waitForNextPatch();
+    assert.strictEqual(client2.state.players.get(client2.sessionId).hp, 63);
+    assert.strictEqual(client1.state.players.get(client2.sessionId).dead, false);
+
+    // A client can never damage itself.
+    client2.send("playerDamage", { targetId: client2.sessionId, hp: 1 });
+    await room.waitForNextPatch();
+    assert.strictEqual(client1.state.players.get(client2.sessionId).hp, 63);
+
+    // hp reaching 0 flips dead, same as a wall's hp reaching 0 flips destroyed.
+    client1.send("playerDamage", { targetId: client2.sessionId, hp: 0 });
+    await room.waitForNextPatch();
+    assert.strictEqual(client1.state.players.get(client2.sessionId).dead, true);
+
+    // A dead target can't be damaged again until it respawns.
+    client1.send("playerDamage", { targetId: client2.sessionId, hp: 50 });
+    await room.waitForNextPatch();
+    assert.strictEqual(client1.state.players.get(client2.sessionId).hp, 0);
+
+    client2.send("playerRespawn", {});
+    await room.waitForNextPatch();
+    const respawned = client1.state.players.get(client2.sessionId);
+    assert.strictEqual(respawned.hp, 100);
+    assert.strictEqual(respawned.dead, false);
   });
 });
